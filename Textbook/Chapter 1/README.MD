@@ -8,7 +8,7 @@ All work is part of my progress in **IST 687: Introduction to Data Science**, ta
 ## Contents
 - **Case Study: Calculating Net Promoter Score (NPS)**  
   - Implemented in R using vectors and conditional logic.  
-  - Final NPS result: **18.18%**, with responses ranging between 3–9:contentReference[oaicite:1]{index=1}.
+  - Final NPS result: **18.18%**, with responses ranging between 3–9:contentReference.
 
 - **Chapter End Questions** (vector manipulation practice in R):  
   1. Add a family member’s age with `c()` and `append()`.  
@@ -17,7 +17,7 @@ All work is part of my progress in **IST 687: Introduction to Data Science**, ta
   4. Conditional expression returning TRUE for values equal to 12.  
   5. Negated conditional expression (using `!=`).  
   6. Subsetting values not equal to 12.  
-  7. Power user: Using the built-in `Nile` dataset to count years where water level > 900 (result: **49 times**):contentReference[oaicite:2]{index=2}.
+  7. Power user: Using the built-in `Nile` dataset to count years where water level > 900 (result: **49 times**).
 
 ---
 
