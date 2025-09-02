@@ -1,7 +1,7 @@
 # Chapter 1 — Introduction to Data Science (IST 687)
 
 This folder contains my completed work for **Chapter 1** of *Data Science for Business with R* by Jeffrey S. Saltz and Jeffrey M. Stanton.  
-All work is part of my progress in **IST 687: Introduction to Data Science**, taught by **Christopher Dunham**, during my Master's of Science in **Applied Human-Centered AI** at Syracuse University:contentReference[oaicite:0]{index=0}.
+All work is part of my progress in **IST 687: Introduction to Data Science**, taught by **Christopher Dunham**, during my Master's of Science in **Applied Human-Centered AI** at Syracuse University:contentReference.
 
 ---
 
