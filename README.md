@@ -4,8 +4,8 @@
 
 ## [Syracuse University, Master's of Applied Human Centered Artificial Intelligence](https://ischool.syracuse.edu/academics/applied-human-centered-artificial-intelligence-masters-degree/)
 
-## IST 687 Applied Data Science - Fall 2025
-### Course Syllabus 
+# IST 687 Applied Data Science - Fall 2025
+## Course Syllabus 
 
 **Course Description:**
 The course introduces students to the fundamentals about data and the standards, technologies, and methods for organizing, managing, curating, preserving, and using data. It discusses broader issues relating to data management, ethics, quality control and publication of data.
