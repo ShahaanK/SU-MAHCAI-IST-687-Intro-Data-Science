@@ -1,0 +1,77 @@
+
+myFamilyNames <- c("Dad","Mom","Sis","Bro","Dog")
+myFamilyNames
+
+myFamilyAges <- c(43, 42, 12, 8, 5)
+myFamilyGenders <-
+  c("Male","Female","Female","Male","Female")
+myFamilyWeights <- c(188,136,83,61,44)
+
+myFamily <- data.frame(myFamilyNames, myFamilyAges,
+                       myFamilyGenders, myFamilyWeights)
+
+str(myFamily)
+summary(myFamily)
+myFamilyAges <- c(myFamilyAges, 11)
+# Case Study: Calculating NPS using a Dataframe
+ltr = c(9,9,7,6,8,7)
+TypeOfTravel = c("Business travel", "Business travel","Business travel", "Mileage", "Personal Travel", "Personal Travel")
+survey = data.frame(ltr, TypeOfTravel)
+
+# Output of new dataframe
+str(survey)
+
+# Calculate number of promoters and detractors
+numP = sum(survey$ltr > 8)
+numD = sum(survey$ltr < 7)
+
+# Calculate NPS
+total = nrow(survey)
+nps = (numP/total - numD/total) * 100
+nps
+
+# Analysis for the business travel tickets
+busTravelDF = survey[survey$TypeOfTravel=="Business
+travel",]
+# Calculate number of promoters and demoters
+numP = sum(busTravelDF$ltr > 8)
+numD = sum(busTravelDF$ltr < 7)
+
+# Calculate NPS
+total = nrow(busTravelDF)
+bus.nps = (numP/total - numD/total) * 100
+bus.nps
+
+str(survey$TypeOfTravel)
+levels(survey$TypeOfTravel)
+
+nps
+bus.nps
+
+# Chapter Challenges
+# 1. Use the c() command to create a new variable containing the favorite food of each family member. For example, your list could contain the entry "Pizza." Make sure that your new variable includes exactly five values. Call the new variable myFoods. Use str() on your new variable to show what kind of variable it is.
+myFoods = c("Hot Dog", "Pizza", "Ice Cream", "Snowcone", "Butter")
+
+# 2. Add your new variable to the myFamily dataframe. If you were running the code while reading this chapter, you will have myFamilyNames, myFamilyAges, myFamilyGenders, and myFamilyWeights already available. Otherwise, you will need to type in the data for those variables as shown in this chapter.
+
+myFamily$myFoods = myFoods
+myFamily
+
+# 3. Rerun the summary() function on myFamily to get descriptive information on all of the variables including your new variable. Take note of the data type for your new variable and report it in a comment.
+
+summary(myFamily)
+# The new data type is Character
+
+# 4. Create an expression that shows a list of TRUE and FALSE values based on the age of each family member. The variable should be TRUE if myFamily$myFamilyAges is less than 40. In other words, your index will be TRUE for kids and FALSE for adults. Assign the results of your expression to a new variable called myIndex.
+
+myIndex = myFamily$myFamilyAges < 40
+myIndex
+
+# 5. Use myIndex from the previous problem to show the favorite foods for each kid in the family. If you used the variable name suggested in problem 1, the expression would be myFamily$myFoods[myIndex].
+
+myFamily$myFoods[myIndex]
+
+#6. The ! character is used to invert a set of Boolean values by changing each TRUE to FALSE and vice versa. Adapt the expression from the previous problem to show the favorite foods for each kid in the family
+
+myFamily$myFoods[!myIndex]
+
