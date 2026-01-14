@@ -1,0 +1,1588 @@
+---
+title: "IST 687 - eSC Final Project - Approach 2"
+author: "Shahaan Khan, Ben Euto, Vaibhav Deokar"
+date: "2025-12-01"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+library(arrow, quietly = TRUE)
+library(tidyverse, quietly = TRUE)
+library(formatR)
+library(imputeTS)
+library(caret)
+library(kernlab)
+set.seed(1)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set-Up
+### 
+
+```{r}
+
+house_static_df = read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet")
+house_ID_df = read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/102063.parquet")
+county_ID_df = read_csv("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/G4500010.csv", show_col_types = FALSE)
+md_ID_df = read_csv("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/data_dictionary.csv", show_col_types = FALSE)
+```
+
+# Functions
+
+## Population Sampler
+### Creates a stratified population based on designated sample size so we are able to have representation for all counties.
+```{r}
+stratified_sample_picker = function(df, s){
+  
+  fraction = s / nrow(df)
+  
+  sampled_data = df %>% 
+    group_by(in.county) %>% 
+    sample_frac(fraction)
+
+  return(sampled_data)
+}
+
+
+```
+
+## House Energy Picker
+### Lets you pick the correct house energy file. Will return the file as a dataframe.
+```{r}
+house_energy_picker = function(identifier){
+  
+  tempFileStart = "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/"
+  tempFilePicked = identifier
+  tempFileEnd = ".parquet"
+  
+  tempDF = read_parquet(paste0(tempFileStart, tempFilePicked, tempFileEnd))
+  tempDF$time = as.POSIXct(tempDF$time)
+
+  tempDF = tempDF %>% 
+    filter(time >= as.POSIXct("2018-07-01 00:00:00") & time <= as.POSIXct("2018-07-31 23:00:00"))  
+  
+  return(tempDF)
+}
+
+```
+
+## House Weather Picker
+### Lets you pick the correct house weather file. Will return the file as a dataframe.
+```{r}
+house_weather_picker = function(countyCode){
+  
+  tempFileStart = "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/"
+  tempFilePicked = countyCode
+  tempFileEnd = ".csv"
+  
+  tempDF = read_csv(paste0(tempFileStart, tempFilePicked, tempFileEnd), show_col_types = FALSE)
+  
+  tempDF = tempDF %>%
+    rename(time = date_time)
+  
+  tempDF$time = as.POSIXct(tempDF$time)
+  
+  tempDF = tempDF %>% 
+    filter(time >= as.POSIXct("2018-07-01 00:00:00") & time <= as.POSIXct("2018-07-31 23:00:00"))
+  
+  # For merging
+  tempDF$in.county = countyCode
+  
+  return(tempDF)
+}
+
+```
+
+## Process Sampler
+### Takes the dataframes of house and house energy usage and merges them together. For July
+```{r}
+process_sample = function(sampled_df) {
+  
+  # Download weather per county
+  counties_needed = unique(sampled_df$in.county)
+  weather_list = list()
+  
+  for (county in counties_needed) {
+    weather_list[[county]] = house_weather_picker(county)
+  }
+  
+  all_weather = bind_rows(weather_list)
+  
+  #Download energy for each house
+  house_ids = sampled_df$bldg_id
+  energy_list = list()
+  
+  for (i in seq_along(house_ids)) {
+    energy_df = house_energy_picker(house_ids[i])
+    energy_df$bldg_id = house_ids[i]
+    energy_list[[i]] = energy_df
+  }
+  
+  all_energy = bind_rows(energy_list)
+  
+  # Add county to energy for joining
+  house_county_map = sampled_df %>% 
+    select(bldg_id, in.county)
+  
+  all_energy = all_energy %>% 
+    left_join(house_county_map, by = "bldg_id")
+  
+  # Join energy + weather
+  merged_E_W = all_energy %>% 
+    left_join(all_weather, by = c("in.county", "time"))
+  
+  # Join with house static data
+  combined_df = merged_E_W %>% 
+    left_join(house_static_df, by = c("bldg_id", "in.county"))
+  
+  return(combined_df)
+}
+
+```
+
+## Find missing values
+### Find values in data that aren't in ordering
+```{r}
+find_missing_levels = function(df, col_name, expected_levels) {
+  actual_values = unique(df[[col_name]])
+  missing = setdiff(actual_values, expected_levels)
+  if (length(missing) > 0) {
+    print(paste("\n", col_name, " - VALUES IN DATA NOT IN YOUR ORDERING:\n", sep = ""))
+    print(missing)
+  }
+}
+```
+
+## Dictionary Lookup
+### Takes the attribute name, looks in the metadata and returns the field_name, field_description, allowable_enumerations_baseline.
+```{r}
+dic_lookup = function(name){
+  
+  md_ID_df %>% 
+    select(field_name, field_description, allowable_enumerations_baseline) %>% 
+    filter(field_name == name)
+  
+}
+```
+
+## Calculate interaction terms
+### Give the name of the new dataframe and automatically calculate the interaction terms.
+```{r}
+interaction_calc = function(df){
+    # Calculate interaction terms
+    df$temp_x_insulation_wall = df$`Dry Bulb Temperature [°C]` * df$in.insulation_wall
+    df$temp_x_insulation_ceiling = df$`Dry Bulb Temperature [°C]` * df$in.insulation_ceiling
+    df$temp_x_hvac = df$`Dry Bulb Temperature [°C]` * df$in.hvac_cooling_efficiency
+    df$temp_x_windows = df$`Dry Bulb Temperature [°C]` * df$in.windows
+    df$temp_x_window_area = df$`Dry Bulb Temperature [°C]` * df$in.window_areas
+    df$hour_x_temp = df$hour * df$`Dry Bulb Temperature [°C]`
+    df$temp_x_humidity = df$`Dry Bulb Temperature [°C]` * df$`Relative Humidity [%]`
+    df$solar_x_windows = df$`Global Horizontal Radiation [W/m2]` * df$in.windows
+    df$solar_x_window_area = df$`Global Horizontal Radiation [W/m2]` * df$in.window_areas
+    
+    return(df)
+}
+
+```
+
+# Begin Coding
+## Loading in the Sampled Data
+```{r}
+sampled_data = stratified_sample_picker(house_static_df, 250)
+sampled_data_df = process_sample(sampled_data)
+mergedDF = sampled_data_df # For testing
+
+```
+
+
+## Setting up dataframe for modeling
+### Adjusted factoring logic to account for the insulation steps.
+```{r}
+roof_order = c("Unfinished, Uninsulated",
+                "Finished, Uninsulated",
+                "Finished, R-7",
+                "Finished, R-13",
+                "Finished, R-19",
+                "Finished, R-30",
+                "Finished, R-38",
+                "Finished, R-49")
+
+mergedDF$in.insulation_roof = factor(mergedDF$in.insulation_roof, levels = roof_order)
+mergedDF$in.insulation_roof = as.numeric(mergedDF$in.insulation_roof)
+
+ceiling_order = c("None",
+                   "Uninsulated",
+                   "R-7",
+                   "R-13",
+                   "R-19",
+                   "R-30",
+                   "R-38",
+                   "R-49")
+
+mergedDF$in.insulation_ceiling = factor(mergedDF$in.insulation_ceiling, levels = ceiling_order)
+mergedDF$in.insulation_ceiling = as.numeric(mergedDF$in.insulation_ceiling)
+
+floor_order = c("None",
+                 "Uninsulated",
+                 "Ceiling R-13",
+                 "Ceiling R-19",
+                 "Ceiling R-30")
+
+mergedDF$in.insulation_floor = factor(mergedDF$in.insulation_floor, levels = floor_order)
+mergedDF$in.insulation_floor = as.numeric(mergedDF$in.insulation_floor)
+
+found_wall_order = c("None",
+                      "Uninsulated",
+                      "Wall R-5, Exterior",
+                      "Wall R-10, Exterior",
+                      "Wall R-15, Exterior")
+
+mergedDF$in.insulation_foundation_wall = factor(mergedDF$in.insulation_foundation_wall,
+                                                 levels = found_wall_order)
+mergedDF$in.insulation_foundation_wall = as.numeric(mergedDF$in.insulation_foundation_wall)
+
+rim_order = c("None",
+               "Uninsulated",
+               "R-5, Exterior",
+               "R-10, Exterior",
+               "R-15, Exterior")
+
+mergedDF$in.insulation_rim_joist = factor(mergedDF$in.insulation_rim_joist, levels = rim_order)
+mergedDF$in.insulation_rim_joist = as.numeric(mergedDF$in.insulation_rim_joist)
+
+wall_order = c("None",
+                "Wood Stud, Uninsulated",
+                "CMU, 6-in Hollow, Uninsulated",
+                "Brick, 12-in, 3-wythe, Uninsulated",
+                "Wood Stud, R-7",
+                "CMU, 6-in Hollow, R-7",
+                "Brick, 12-in, 3-wythe, R-7",
+                "Wood Stud, R-11",
+                "CMU, 6-in Hollow, R-11",
+                "Brick, 12-in, 3-wythe, R-11",
+                "Wood Stud, R-15",
+                "CMU, 6-in Hollow, R-15",
+                "Brick, 12-in, 3-wythe, R-15",
+                "Wood Stud, R-19",
+                "CMU, 6-in Hollow, R-19",
+                "Brick, 12-in, 3-wythe, R-19")
+
+mergedDF$in.insulation_wall = factor(mergedDF$in.insulation_wall, levels = wall_order)
+mergedDF$in.insulation_wall = as.numeric(mergedDF$in.insulation_wall)
+
+slab_order = c("None",
+                "Uninsulated",
+                "2ft R5 Under, Horizontal",
+                "2ft R5 Perimeter, Vertical",
+                "2ft R10 Under, Horizontal",
+                "2ft R10 Perimeter, Vertical")
+
+mergedDF$in.insulation_slab = factor(mergedDF$in.insulation_slab, levels = slab_order)
+mergedDF$in.insulation_slab = as.numeric(mergedDF$in.insulation_slab)
+
+window_order = c("None",
+                  "Single, Clear, Metal",                                    
+                  "Single, Clear, Non-metal",                                
+                  "Single, Clear, Metal, Exterior Clear Storm",              
+                  "Single, Clear, Non-metal, Exterior Clear Storm",
+                  "Double, Clear, Metal, Air",                               
+                  "Double, Clear, Non-metal, Air",
+                  "Double, Clear, Metal, Air, Exterior Clear Storm",
+                  "Double, Clear, Non-metal, Air, Exterior Clear Storm",
+                  "Double, Low-E, Non-metal, Air, M-Gain",                   
+                  "Triple, Low-E, Non-metal, Air, L-Gain")                   
+
+mergedDF$in.windows = factor(mergedDF$in.windows, levels = window_order)
+mergedDF$in.windows = as.numeric(mergedDF$in.windows)
+
+duct_order = c("None",
+                "30% Leakage, Uninsulated",
+                "30% Leakage, R-4",
+                "30% Leakage, R-6",
+                "30% Leakage, R-8",
+                "20% Leakage, Uninsulated",
+                "20% Leakage, R-4",
+                "20% Leakage, R-6",
+                "20% Leakage, R-8",
+                "10% Leakage, Uninsulated",
+                "10% Leakage, R-4",
+                "10% Leakage, R-6",
+                "10% Leakage, R-8",
+                "0% Leakage, Uninsulated")
+
+mergedDF$in.ducts = factor(mergedDF$in.ducts, levels = duct_order)
+mergedDF$in.ducts = as.numeric(mergedDF$in.ducts)
+
+cooling_order = c("None",
+                   "Room AC, EER 8.5",
+                   "Room AC, EER 9.8",
+                   "AC, SEER 8",
+                   "Room AC, EER 10.7",
+                   "AC, SEER 10",
+                   "Room AC, EER 12.0",
+                   "AC, SEER 13",
+                   "AC, SEER 15",
+                   "Heat Pump")
+
+mergedDF$in.hvac_cooling_efficiency = factor(mergedDF$in.hvac_cooling_efficiency,
+                                              levels = cooling_order)
+mergedDF$in.hvac_cooling_efficiency = as.numeric(mergedDF$in.hvac_cooling_efficiency)
+
+
+usage_order = c("Low",
+                 "Medium",
+                 "High")
+
+mergedDF$in.usage_level = factor(mergedDF$in.usage_level, levels = usage_order)
+mergedDF$in.usage_level = as.numeric(mergedDF$in.usage_level)
+
+window_area_order = c("F6 B6 L6 R6", 
+                       "F9 B9 L9 R9",
+                       "F12 B12 L12 R12",
+                       "F15 B15 L15 R15",
+                       "F18 B18 L18 R18",
+                       "F30 B30 L30 R30")  
+
+mergedDF$in.window_areas = factor(mergedDF$in.window_areas, levels = window_area_order)
+mergedDF$in.window_areas = as.numeric(mergedDF$in.window_areas)
+
+mergedDF$hour = hour(mergedDF$time)
+mergedDF$day = day(mergedDF$time)
+mergedDF$day_of_week = wday(mergedDF$time)
+mergedDF$is_weekend = mergedDF$day_of_week %in% c(1, 7)
+mergedDF$is_peak_hour = mergedDF$hour >= 15 & mergedDF$hour <= 19
+
+mergedDF$size_category = cut(mergedDF$in.sqft,
+                               breaks = c(0, 1500, 2500, 3500, Inf),
+                               labels = c("Small", "Medium", "Large", "XLarge"))
+
+mergedDF$age_category = case_when(
+  mergedDF$in.vintage %in% c("<1940", "1940s", "1950s", "1960s") ~ "Old",
+  mergedDF$in.vintage %in% c("1970s", "1980s", "1990s") ~ "Mid",
+  mergedDF$in.vintage %in% c("2000s", "2010s") ~ "New",
+  TRUE ~ "Unknown"
+)
+
+mergedDF$cooling_type = as.factor(mergedDF$in.hvac_cooling_type)
+mergedDF$vintage_group = as.factor(mergedDF$in.vintage)
+```
+
+## Setting new energy usage totals
+```{r}
+# Only sum electricity consumption
+mergedDF$total_usage = rowSums(select(mergedDF, starts_with("out.electricity.")), na.rm = TRUE)
+mergedDF$usage_per_sqft = mergedDF$total_usage / mergedDF$in.sqft
+
+# Average usage by hour for each county
+mergedDF = mergedDF %>%
+  group_by(in.county, hour) %>%
+  mutate(avg_usage_per_hour_per_county = mean(total_usage, na.rm = TRUE))
+
+```
+
+## Confirming NA's
+```{r}
+# Find NA
+check_factor_nas = function(df, col_name) {
+  na_count = sum(is.na(df[[col_name]]))
+  total = nrow(df)
+  pct = round(na_count / total * 100, 2)
+  cat(col_name, ": ", na_count, " NAs (", pct, "%)\n", sep = "")
+}
+
+# Check what values actually exist in the data
+unique(mergedDF$in.insulation_roof)
+unique(mergedDF$in.insulation_ceiling)
+unique(mergedDF$in.insulation_floor)
+unique(mergedDF$in.insulation_foundation_wall)
+unique(mergedDF$in.insulation_rim_joist)
+unique(mergedDF$in.insulation_wall)
+unique(mergedDF$in.insulation_slab)
+unique(mergedDF$in.windows)
+unique(mergedDF$in.ducts)
+unique(mergedDF$in.hvac_cooling_efficiency)
+unique(mergedDF$in.usage_level)
+unique(mergedDF$in.window_areas)
+
+check_factor_nas(mergedDF, "in.insulation_roof")
+check_factor_nas(mergedDF, "in.insulation_ceiling")
+check_factor_nas(mergedDF, "in.insulation_floor")
+check_factor_nas(mergedDF, "in.insulation_foundation_wall")
+check_factor_nas(mergedDF, "in.insulation_rim_joist")
+check_factor_nas(mergedDF, "in.insulation_wall")
+check_factor_nas(mergedDF, "in.insulation_slab")
+check_factor_nas(mergedDF, "in.windows")
+check_factor_nas(mergedDF, "in.ducts")
+check_factor_nas(mergedDF, "in.hvac_cooling_efficiency")
+check_factor_nas(mergedDF, "in.usage_level")
+check_factor_nas(mergedDF, "in.window_areas")
+```
+
+# ReRun from Below here ------------------------------------------------------------------------------------------
+##  Modelling on whole set
+## Model 1
+```{r}
+modelDF = mergedDF %>%
+  select(
+    # County needed
+    in.county,
+    
+    # Target
+    usage_per_sqft,
+    
+    # Usage variables - can't use these data leak
+    # total_usage,
+    # avg_usage_per_hour_per_county,
+    
+    # Weather features
+    `Dry Bulb Temperature [°C]`,
+    `Relative Humidity [%]`,
+    `Global Horizontal Radiation [W/m2]`,
+    
+    # Time features
+    hour,
+    day_of_week,
+    
+    # House features
+    in.insulation_ceiling,
+    in.insulation_floor,
+    in.insulation_foundation_wall,
+    in.insulation_wall,
+    in.insulation_slab,
+    in.windows,
+    in.ducts,
+    in.hvac_cooling_efficiency,
+
+    # Other house features
+    in.bedrooms,
+    in.geometry_stories,
+    in.occupants
+  )
+
+```
+
+## Model 1
+### Adjusted R-Value 0.21507007
+```{r}
+# Base model to try
+lmModel = lm(usage_per_sqft ~ .- in.county, data = modelDF)
+
+# Base model with only significant values
+lmModel_base_only_sig = lm(usage_per_sqft ~ . - in.county - day_of_week, data = modelDF)
+
+# Base model with only insulation
+lmModel_insulation = lm(usage_per_sqft ~ `Dry Bulb Temperature [°C]`+
+                          `Global Horizontal Radiation [W/m2]` +
+                          `Relative Humidity [%]` + 
+                          in.insulation_ceiling+
+                          in.insulation_floor+
+                          in.insulation_foundation_wall+
+                          in.insulation_wall+
+                          in.insulation_slab, data = modelDF)
+
+# Base model with insulation and house size
+lmModel_house_size = lm(usage_per_sqft ~ `Dry Bulb Temperature [°C]`+
+                          `Global Horizontal Radiation [W/m2]` +
+                          `Relative Humidity [%]` + 
+                          in.insulation_ceiling+
+                          in.insulation_floor+
+                          in.insulation_foundation_wall+
+                          in.insulation_wall+
+                          in.insulation_slab+
+                          in.bedrooms+
+                          in.geometry_stories+
+                          in.occupants, data = modelDF,)
+
+# Put into a dataframe to compare it
+model_comparison = data.frame(
+  Model = c("lmModel", "lmModel_base_only_sig", "lmModel_insulation", "lmModel_house_size"),
+  R_Squared = c(
+    summary(lmModel)$r.squared,
+    summary(lmModel_base_only_sig)$r.squared,
+    summary(lmModel_insulation)$r.squared,
+    summary(lmModel_house_size)$r.squared
+  ),
+  Adj_R_Squared = c(
+    summary(lmModel)$adj.r.squared,
+    summary(lmModel_base_only_sig)$adj.r.squared,
+    summary(lmModel_insulation)$adj.r.squared,
+    summary(lmModel_house_size)$adj.r.squared
+  ),
+  Num_Predictors = c(
+    length(coef(lmModel)) - 1,
+    length(coef(lmModel_base_only_sig)) - 1,
+    length(coef(lmModel_insulation)) - 1,
+    length(coef(lmModel_house_size)) - 1
+  )
+)
+# Sort by best first
+model_comparison = model_comparison %>% arrange(desc(Adj_R_Squared))
+print(model_comparison)
+
+```
+
+## Model 2
+## Models with Interaction Set-up
+### These will show how we can have the factors talk to each other
+```{r}
+mergedDF = interaction_calc(mergedDF)
+
+```
+## Models with Interaction Modelling
+### These will show the R values
+```{r}
+
+modelDF_interaction = mergedDF %>%
+  select(
+    in.county,
+    bldg_id,
+    
+    # Target
+    total_usage,
+    
+    # Weather features
+    `Dry Bulb Temperature [°C]`,
+    `Relative Humidity [%]`,
+    `Global Horizontal Radiation [W/m2]`,
+    
+    # Time features
+    hour,
+    day_of_week,
+    
+    # House features
+    in.insulation_ceiling,
+    in.insulation_wall,
+    in.insulation_floor,
+    in.insulation_foundation_wall,
+    in.insulation_slab,
+    in.windows,
+    in.window_areas,
+    in.ducts,
+    in.hvac_cooling_efficiency,
+    in.bedrooms,
+    in.geometry_stories,
+    in.occupants,
+    
+    # INTERACTION TERMS
+    temp_x_insulation_wall,
+    temp_x_insulation_ceiling,
+    temp_x_hvac,
+    temp_x_windows,
+    temp_x_window_area,
+    hour_x_temp,
+    temp_x_humidity,
+    solar_x_windows,
+    solar_x_window_area,
+    
+    # To try to improve model
+    in.cooling_setpoint,           
+    in.infiltration,              
+    in.orientation,              
+    in.roof_material,             
+    in.vintage,                   
+    in.geometry_garage,           
+    'Wind Speed [m/s]',           
+  )
+
+# Base Model with interactions 
+lm_with_interactions = lm(total_usage ~ . - in.county - bldg_id, data = modelDF_interaction)
+
+# Model with interactions with only significant
+lm_with_interactions_sig = lm(total_usage ~ . - in.county - bldg_id - in.insulation_slab - in.hvac_cooling_efficiency - temp_x_hvac - solar_x_windows - in.infiltration, data = modelDF_interaction)
+
+# Model with interactions and custom choice
+lm_with_interactions_custom = lm(total_usage ~
+    `Dry Bulb Temperature [°C]` +
+    `Relative Humidity [%]` +
+    `Global Horizontal Radiation [W/m2]` +
+    hour +
+    in.insulation_ceiling +
+    in.insulation_wall +
+    in.insulation_floor +
+    in.insulation_foundation_wall +
+    in.windows +
+    in.ducts +
+    in.hvac_cooling_efficiency +
+    in.bedrooms +
+    in.occupants +
+    temp_x_insulation_wall +
+    temp_x_insulation_ceiling +
+    temp_x_hvac +
+    temp_x_windows +
+    hour_x_temp +
+    temp_x_humidity +
+    solar_x_windows +
+    in.cooling_setpoint +
+    in.roof_material +
+    `Wind Speed [m/s]`, data = modelDF_interaction)
+
+
+```
+
+## Compare the best lm model with the best lm with interaction
+```{r}
+# Compare the two
+# Best current model: lmModel vs best lm_with_interactions
+# New model with interactions
+
+#summary(lm_with_interactions)
+#summary(lm_with_interactions_sig)
+#summary(lm_with_interactions_custom)
+
+# Put into a dataframe to compare it
+model_interaction_comparison = data.frame(
+  Model = c("lm_with_interactions", "lm_with_interactions_sig", "lm_with_interactions_custom"),
+  R_Squared = c(
+    summary(lm_with_interactions)$r.squared,
+    summary(lm_with_interactions_sig)$r.squared,
+    summary(lm_with_interactions_custom)$r.squared
+  ),
+  Adj_R_Squared = c(
+    summary(lm_with_interactions)$adj.r.squared,
+    summary(lm_with_interactions_sig)$adj.r.squared,
+    summary(lm_with_interactions_custom)$adj.r.squared
+  ),
+  Num_Predictors = c(
+    length(coef(lm_with_interactions)) - 1,
+    length(coef(lm_with_interactions_sig)) - 1,
+    length(coef(lm_with_interactions_custom)) - 1
+  )
+)
+
+# Sort by best first
+model_interaction_comparison = model_interaction_comparison %>% arrange(desc(Adj_R_Squared))
+print(model_interaction_comparison)
+```
+
+## Decide the winner
+```{r}
+best_model_comparison = rbind(model_interaction_comparison, model_comparison)
+best_model_comparison = best_model_comparison %>% arrange(desc(Adj_R_Squared))
+print(best_model_comparison)
+
+```
+# Best Model: lm_with_interactions. Now we break it up
+```{r}
+library(caret)
+
+train_indices = createDataPartition(
+  modelDF_interaction$total_usage, 
+  p = 0.80, 
+  list = FALSE
+)
+
+train_df = modelDF_interaction[train_indices, ]
+test_df = modelDF_interaction[-train_indices, ]
+
+dim(modelDF_interaction)
+dim(train_df)
+dim(test_df)
+
+
+lm_with_interactions = lm(total_usage ~ . - in.county - bldg_id, 
+  data = train_df
+)
+
+test_df$predicted = predict(lm_with_interactions, newdata = test_df)
+rmse = sqrt(mean((test_df$total_usage - test_df$predicted)^2))
+mae = mean(abs(test_df$total_usage - test_df$predicted))
+print(paste("Test RMSE:", rmse, "Test MAE:", mae))
+```
+# Creating a prediction - Use for Shiny app later
+```{r}
+new_data = data.frame(
+  in.county = "G4500010",
+  bldg_id = 0,
+  in.sqft = 2000,
+  
+  # Weather features
+  `Dry Bulb Temperature [°C]` = 25,
+  `Relative Humidity [%]` = 75,
+  `Global Horizontal Radiation [W/m2]` = 800,
+  `Wind Speed [m/s]` = 2.5,
+  
+  # Time features
+  hour = 16,
+  day_of_week = 3,
+  
+  # Numeric house features
+  in.insulation_ceiling = 5,
+  in.insulation_wall = 8,
+  in.insulation_floor = 3,
+  in.insulation_foundation_wall = 2,
+  in.insulation_slab = 2,
+  in.windows = 6,
+  in.window_areas = 3,
+  in.ducts = 7,
+  in.hvac_cooling_efficiency = 5,
+  in.bedrooms = 3,
+  in.geometry_stories = 2,
+  
+  # Factor/character variables
+  in.occupants = "3",                          
+  in.cooling_setpoint = "72F",
+  in.infiltration = "5 ACH50",
+  in.orientation = "South",                   
+  in.roof_material = "Asphalt Shingles, Medium",
+  in.vintage = "1990s",
+  in.geometry_garage = "2 Car",
+  
+  check.names = FALSE
+)
+
+# Calculate interaction terms
+new_data = interaction_calc(new_data)
+
+# Predict
+predicted_usage = predict(lm_with_interactions, newdata = new_data)
+print(paste("Predicted usage:", predicted_usage, "kWh"))
+```
+
+## +5 Perdictor
+```{r}
+future_df = modelDF_interaction %>%
+  mutate(
+    `Dry Bulb Temperature [°C]` = `Dry Bulb Temperature [°C]` + 5,
+    temp_x_insulation_wall = `Dry Bulb Temperature [°C]` * in.insulation_wall,
+    temp_x_insulation_ceiling = `Dry Bulb Temperature [°C]` * in.insulation_ceiling,
+    temp_x_hvac = `Dry Bulb Temperature [°C]` * in.hvac_cooling_efficiency,
+    temp_x_windows = `Dry Bulb Temperature [°C]` * in.windows,
+    temp_x_window_area = `Dry Bulb Temperature [°C]` * in.window_areas,
+    hour_x_temp = hour * `Dry Bulb Temperature [°C]`,
+    temp_x_humidity = `Dry Bulb Temperature [°C]` * `Relative Humidity [%]`
+  )
+
+future_df$predicted_usage = predict(lm_with_interactions, newdata = future_df)
+
+modelDF_interaction$predicted_usage = predict(lm_with_interactions, newdata = modelDF_interaction)
+
+# Compare current vs future by hour
+current_hourly = modelDF_interaction %>%
+  group_by(hour) %>%
+  summarise(
+    total_demand = sum(predicted_usage, na.rm = TRUE),
+    avg_demand = mean(predicted_usage, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(scenario = "Current")
+
+future_hourly = future_df %>%
+  group_by(hour) %>%
+  summarise(
+    total_demand = sum(predicted_usage, na.rm = TRUE),
+    avg_demand = mean(predicted_usage, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(scenario = "Future (+5°C)")
+
+# Combine for comparison
+comparison_hourly = bind_rows(current_hourly, future_hourly)
+
+# Find peak demand
+cat("\n=== PEAK DEMAND COMPARISON ===\n")
+current_peak = current_hourly %>% slice_max(total_demand, n = 1)
+future_peak = future_hourly %>% slice_max(total_demand, n = 1)
+
+cat("Current Peak Hour:", current_peak$hour, ":00\n")
+cat("Current Peak Demand:", round(current_peak$total_demand, 2), "kWh\n")
+cat("\nFuture Peak Hour:", future_peak$hour, ":00\n")
+cat("Future Peak Demand:", round(future_peak$total_demand, 2), "kWh\n")
+
+cat("\n=== INCREASE ===\n")
+demand_increase = future_peak$total_demand - current_peak$total_demand
+pct_increase = (demand_increase / current_peak$total_demand) * 100
+cat("Absolute Increase:", round(demand_increase, 2), "kWh\n")
+cat("Percent Increase:", round(pct_increase, 2), "%\n")
+
+# Visualize
+ggplot(comparison_hourly, aes(x = hour, y = total_demand, color = scenario)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Current" = "steelblue", "Future (+5°C)" = "red")) +
+  labs(
+    title = "Current vs Future Peak Demand by Hour",
+    subtitle = "Impact of 5°C temperature increase on total energy demand",
+    x = "Hour of Day",
+    y = "Total Predicted Demand (kWh)",
+    color = "Scenario"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+```
+
+# Used in presentation
+```{r}
+# Peak Demand Per Hour (Average of All Counties)
+
+peak_demand_hourly = mergedDF %>%
+  group_by(hour) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph1 = ggplot(peak_demand_hourly, aes(x = hour, y = avg_usage)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_area(alpha = 0.2, fill = "steelblue") +
+  geom_vline(xintercept = peak_demand_hourly$hour[which.max(peak_demand_hourly$avg_usage)], 
+             linetype = "dashed", color = "red", size = 1) +
+  labs(
+    title = "Peak Demand Per Hour (Average Across All Counties)",
+    subtitle = "July 2018 - Identifying Peak Usage Hours",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
+
+print(graph1)
+
+# Average Monthly Usage Per Hour by Insulation Level
+
+# Create insulation bins for clearer visualization
+mergedDF$insulation_category = cut(
+  mergedDF$in.insulation_wall,
+  breaks = c(0, 5, 10, 16),
+  labels = c("Low (1-5)", "Medium (6-10)", "High (11-16)")
+)
+
+insulation_hourly = mergedDF %>%
+  filter(!is.na(insulation_category)) %>%
+  group_by(hour, insulation_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph2 = ggplot(insulation_hourly, aes(x = hour, y = avg_usage, color = insulation_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Low (1-5)" = "red", "Medium (6-10)" = "orange", "High (11-16)" = "green")) +
+  labs(
+    title = "Average Hourly Usage by Wall Insulation Level",
+    subtitle = "Better insulation (higher rating) reduces energy consumption",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "Wall Insulation"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(graph2)
+
+# Average Monthly Usage Per Hour by HVAC Efficiency
+
+# Create HVAC efficiency bins
+mergedDF$hvac_category = cut(
+  mergedDF$in.hvac_cooling_efficiency,
+  breaks = c(0, 3, 6, 10),
+  labels = c("Low Efficiency (1-3)", "Medium Efficiency (4-6)", "High Efficiency (7-10)")
+)
+
+hvac_hourly = mergedDF %>%
+  filter(!is.na(hvac_category)) %>%
+  group_by(hour, hvac_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph3 = ggplot(hvac_hourly, aes(x = hour, y = avg_usage, color = hvac_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Low Efficiency (1-3)" = "red", 
+                                 "Medium Efficiency (4-6)" = "orange", 
+                                 "High Efficiency (7-10)" = "green")) +
+  labs(
+    title = "Average Hourly Usage by HVAC Cooling Efficiency",
+    subtitle = "Higher efficiency systems use less energy",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "HVAC Efficiency"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(graph3)
+
+# Average Monthly Usage Per Hour by Window Characteristics
+
+# Create window quality bins
+mergedDF$window_category = cut(
+  mergedDF$in.windows,
+  breaks = c(0, 4, 7, 11),
+  labels = c("Single Pane (1-4)", "Double Pane (5-7)", "Double/Triple Low-E (8-11)")
+)
+
+window_hourly = mergedDF %>%
+  filter(!is.na(window_category)) %>%
+  group_by(hour, window_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph4 = ggplot(window_hourly, aes(x = hour, y = avg_usage, color = window_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Single Pane (1-4)" = "red", 
+                                 "Double Pane (5-7)" = "orange", 
+                                 "Double/Triple Low-E (8-11)" = "green")) +
+  labs(
+    title = "Average Hourly Usage by Window Type",
+    subtitle = "Better windows (double/triple pane, Low-E) reduce heat gain",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "Window Type"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(graph4)
+
+# Average Monthly Usage Per Hour by Weather Conditions
+
+# Create temperature bins
+mergedDF$temp_category = cut(
+  mergedDF$`Dry Bulb Temperature [°C]`,
+  breaks = c(-Inf, 22, 27, 32, Inf),
+  labels = c("Cool (<22°C)", "Mild (22-27°C)", "Warm (27-32°C)", "Hot (>32°C)")
+)
+
+weather_hourly = mergedDF %>%
+  filter(!is.na(temp_category)) %>%
+  group_by(hour, temp_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph5 = ggplot(weather_hourly, aes(x = hour, y = avg_usage, color = temp_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Cool (<22°C)" = "blue", 
+                                 "Mild (22-27°C)" = "green", 
+                                 "Warm (27-32°C)" = "orange", 
+                                 "Hot (>32C)" = "red")) +
+  labs(
+    title = "Average Hourly Usage by Temperature",
+    subtitle = "Higher temperatures drive increased cooling demand",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "Temperature"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(graph5)
+
+# Average Monthly Usage Per Hour by Home Size
+
+size_hourly = mergedDF %>%
+  filter(!is.na(size_category)) %>%
+  group_by(hour, size_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph6 = ggplot(size_hourly, aes(x = hour, y = avg_usage, color = size_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Small" = "green", 
+                                 "Medium" = "blue", 
+                                 "Large" = "orange", 
+                                 "XLarge" = "red")) +
+  labs(
+    title = "Average Hourly Usage by Home Size",
+    subtitle = "Larger homes consume more energy",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "Home Size"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(graph6)
+
+```
+# In presentation - Home Size vs HVAC Efficiency
+```{r}
+# Faceted Line Plot (Best for seeing hourly patterns)
+size_hvac_hourly = mergedDF %>%
+  filter(!is.na(size_category) & !is.na(hvac_category)) %>%
+  group_by(hour, size_category, hvac_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    n_obs = n(),
+    .groups = "drop"
+  )
+
+graph_facet = ggplot(size_hvac_hourly, aes(x = hour, y = avg_usage, color = hvac_category)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  facet_wrap(~size_category, ncol = 2, scales = "free_y") +
+  scale_color_manual(values = c("Low Efficiency (1-3)" = "red", 
+                                 "Medium Efficiency (4-6)" = "orange", 
+                                 "High Efficiency (7-10)" = "green")) +
+  labs(
+    title = "Average Hourly Usage: Home Size vs HVAC Efficiency",
+    subtitle = "Each panel shows a home size category; lines show HVAC efficiency levels",
+    x = "Hour of Day",
+    y = "Average Usage (kWh)",
+    color = "HVAC Efficiency"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 4)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(graph_facet)
+
+# Grouped Bar Chart at Peak Hour Only
+
+# Find peak hour first
+peak_hour = mergedDF %>%
+  group_by(hour) %>%
+  summarise(avg_usage = mean(total_usage)) %>%
+  slice_max(avg_usage) %>%
+  pull(hour)
+
+size_hvac_peak = mergedDF %>%
+  filter(hour == peak_hour & !is.na(size_category) & !is.na(hvac_category)) %>%
+  group_by(size_category, hvac_category) %>%
+  summarise(
+    avg_usage = mean(total_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+graph_bar = ggplot(size_hvac_peak, aes(x = size_category, y = avg_usage, fill = hvac_category)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = round(avg_usage, 3)), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Low Efficiency (1-3)" = "red", 
+                                "Medium Efficiency (4-6)" = "orange", 
+                                "High Efficiency (7-10)" = "green")) +
+  labs(
+    title = paste0("Average Usage at Peak Hour (", peak_hour, ":00) by Home Size & HVAC Efficiency"),
+    subtitle = "Comparing the impact of both factors during highest demand",
+    x = "Home Size",
+    y = "Average Usage (kWh)",
+    fill = "HVAC Efficiency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(graph_bar)
+
+
+```
+
+## Task 7a: Future demand by county/region
+```{r}
+
+future_by_county = future_df %>%
+  group_by(in.county, hour) %>%
+  summarise(
+    total_demand = sum(predicted_usage, na.rm = TRUE),
+    avg_demand = mean(predicted_usage, na.rm = TRUE),
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  )
+
+# Find peak hour per county
+county_peaks = future_by_county %>%
+  group_by(in.county) %>%
+  slice_max(total_demand, n = 1) %>%
+  arrange(desc(total_demand))
+
+# THIS LINE IS MISSING - define top_counties
+top_counties = county_peaks %>% head(5) %>% pull(in.county)
+
+# Now the plot will work
+future_by_county %>%
+  filter(in.county %in% top_counties) %>%
+  ggplot(aes(x = hour, y = total_demand, color = in.county)) +
+  geom_line(linewidth = 1.2) +
+  labs(
+    title = "Future Peak Demand by County (Top 5)",
+    subtitle = "Projected demand with 5C temperature increase",
+    x = "Hour of Day",
+    y = "Total Predicted Demand (kWh)",
+    color = "County"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+```
+
+## Task 7b: Future demand by other attributes
+```{r}
+future_df = modelDF_interaction %>%
+  mutate(
+    `Dry Bulb Temperature [°C]` = `Dry Bulb Temperature [°C]` + 5,
+    temp_x_insulation_wall = `Dry Bulb Temperature [°C]` * in.insulation_wall,
+    temp_x_insulation_ceiling = `Dry Bulb Temperature [°C]` * in.insulation_ceiling,
+    temp_x_hvac = `Dry Bulb Temperature [°C]` * in.hvac_cooling_efficiency,
+    temp_x_windows = `Dry Bulb Temperature [°C]` * in.windows,
+    temp_x_window_area = `Dry Bulb Temperature [°C]` * in.window_areas,
+    hour_x_temp = hour * `Dry Bulb Temperature [°C]`,
+    temp_x_humidity = `Dry Bulb Temperature [°C]` * `Relative Humidity [%]`
+  )
+
+future_df$predicted_usage = predict(lm_with_interactions, newdata = future_df)
+
+# NOW add sqft properly
+sqft_lookup = mergedDF %>% 
+  ungroup() %>% 
+  select(bldg_id, in.sqft) %>% 
+  distinct()
+
+future_df = future_df %>%
+  left_join(sqft_lookup, by = "bldg_id")
+
+# Now this will work
+future_df$size_category = cut(future_df$in.sqft,
+                               breaks = c(0, 1500, 2500, 3500, Inf),
+                               labels = c("Small", "Medium", "Large", "XLarge"))
+
+future_by_size = future_df %>%
+  filter(!is.na(size_category)) %>%
+  group_by(size_category, hour) %>%
+  summarise(
+    total_demand = sum(predicted_usage, na.rm = TRUE),
+    avg_demand = mean(predicted_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(future_by_size, aes(x = hour, y = avg_demand, color = size_category)) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = c("Small" = "green", "Medium" = "blue", 
+                                 "Large" = "orange", "XLarge" = "red")) +
+  labs(
+    title = "Future Average Demand by Home Size",
+    subtitle = "Projected demand with 5C temperature increase",
+    x = "Hour of Day",
+    y = "Average Predicted Demand (kWh)",
+    color = "Home Size"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal()
+
+
+# By HVAC efficiency
+future_df$hvac_category = cut(future_df$in.hvac_cooling_efficiency,
+                               breaks = c(0, 3, 6, 10),
+                               labels = c("Low (1-3)", "Medium (4-6)", "High (7-10)"))
+
+future_by_hvac = future_df %>%
+  filter(!is.na(hvac_category)) %>%
+  group_by(hvac_category, hour) %>%
+  summarise(
+    total_demand = sum(predicted_usage, na.rm = TRUE),
+    avg_demand = mean(predicted_usage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(future_by_hvac, aes(x = hour, y = avg_demand, color = hvac_category)) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = c("Low (1-3)" = "red", "Medium (4-6)" = "orange", 
+                                 "High (7-10)" = "green")) +
+  labs(
+    title = "Future Average Demand by HVAC Efficiency",
+    subtitle = "Projected demand with 5C temperature increase",
+    x = "Hour of Day",
+    y = "Average Predicted Demand (kWh)",
+    color = "HVAC Efficiency"
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  theme_minimal()
+
+
+
+```
+## Population Distribution Graphs
+```{r}
+# Distribution by Home Size
+
+size_distribution = future_df %>%
+  filter(!is.na(size_category)) %>%
+  group_by(size_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1),
+    label = paste0(n_houses, " (", pct, "%)")
+  )
+
+graph_size_dist = ggplot(size_distribution, aes(x = size_category, y = n_houses, fill = size_category)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Small" = "green", "Medium" = "blue", 
+                                "Large" = "orange", "XLarge" = "red")) +
+  labs(
+    title = "Distribution of Homes by Size",
+    subtitle = "Number of houses in each size category",
+    x = "Home Size Category",
+    y = "Number of Houses"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  ylim(0, max(size_distribution$n_houses) * 1.15)
+
+print(graph_size_dist)
+
+# Distribution by HVAC Efficiency
+
+hvac_distribution = future_df %>%
+  filter(!is.na(hvac_category)) %>%
+  group_by(hvac_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1),
+    label = paste0(n_houses, " (", pct, "%)")
+  )
+
+graph_hvac_dist = ggplot(hvac_distribution, aes(x = hvac_category, y = n_houses, fill = hvac_category)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Low (1-3)" = "red", "Medium (4-6)" = "orange", 
+                                "High (7-10)" = "green")) +
+  labs(
+    title = "Distribution of Homes by HVAC Efficiency",
+    subtitle = "Number of houses in each efficiency category",
+    x = "HVAC Efficiency Category",
+    y = "Number of Houses"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  ylim(0, max(hvac_distribution$n_houses) * 1.15)
+
+print(graph_hvac_dist)
+
+# Distribution by Wall Insulation
+
+# Create insulation category if not exists
+future_df$insulation_category = cut(
+  future_df$in.insulation_wall,
+  breaks = c(0, 5, 10, 16),
+  labels = c("Low (1-5)", "Medium (6-10)", "High (11-16)")
+)
+
+insulation_distribution = future_df %>%
+  filter(!is.na(insulation_category)) %>%
+  group_by(insulation_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1),
+    label = paste0(n_houses, " (", pct, "%)")
+  )
+
+graph_insulation_dist = ggplot(insulation_distribution, aes(x = insulation_category, y = n_houses, fill = insulation_category)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Low (1-5)" = "red", "Medium (6-10)" = "orange", 
+                                "High (11-16)" = "green")) +
+  labs(
+    title = "Distribution of Homes by Wall Insulation",
+    subtitle = "Number of houses in each insulation category",
+    x = "Wall Insulation Category",
+    y = "Number of Houses"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  ylim(0, max(insulation_distribution$n_houses) * 1.15)
+
+print(graph_insulation_dist)
+
+# Distribution by Window Type
+
+future_df$window_category = cut(
+  future_df$in.windows,
+  breaks = c(0, 4, 7, 11),
+  labels = c("Single Pane (1-4)", "Double Pane (5-7)", "Double/Triple Low-E (8-11)")
+)
+
+window_distribution = future_df %>%
+  filter(!is.na(window_category)) %>%
+  group_by(window_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1),
+    label = paste0(n_houses, " (", pct, "%)")
+  )
+
+graph_window_dist = ggplot(window_distribution, aes(x = window_category, y = n_houses, fill = window_category)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Single Pane (1-4)" = "red", 
+                                "Double Pane (5-7)" = "orange", 
+                                "Double/Triple Low-E (8-11)" = "green")) +
+  labs(
+    title = "Distribution of Homes by Window Type",
+    subtitle = "Number of houses in each window category",
+    x = "Window Type Category",
+    y = "Number of Houses"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  ylim(0, max(window_distribution$n_houses) * 1.15)
+
+print(graph_window_dist)
+
+```
+
+## Cross-Distribution Graphs: By Home Size
+```{r}
+# Window Type Distribution by Home Size
+
+window_by_size = future_df %>%
+  filter(!is.na(window_category) & !is.na(size_category)) %>%
+  group_by(size_category, window_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  group_by(size_category) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1)
+  )
+
+graph_window_by_size = ggplot(window_by_size, aes(x = size_category, y = n_houses, fill = window_category)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Single Pane (1-4)" = "red", 
+                                "Double Pane (5-7)" = "orange", 
+                                "Double/Triple Low-E (8-11)" = "green")) +
+  labs(
+    title = "Distribution of Window Types by Home Size",
+    subtitle = "Number of houses with each window type, grouped by home size",
+    x = "Home Size",
+    y = "Number of Houses",
+    fill = "Window Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_window_by_size)
+
+# HVAC Efficiency Distribution by Home Size
+hvac_by_size = future_df %>%
+  filter(!is.na(hvac_category) & !is.na(size_category)) %>%
+  group_by(size_category, hvac_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  group_by(size_category) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1)
+  )
+
+graph_hvac_by_size = ggplot(hvac_by_size, aes(x = size_category, y = n_houses, fill = hvac_category)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Low (1-3)" = "red", 
+                                "Medium (4-6)" = "orange", 
+                                "High (7-10)" = "green")) +
+  labs(
+    title = "Distribution of HVAC Efficiency by Home Size",
+    subtitle = "Number of houses with each HVAC efficiency level, grouped by home size",
+    x = "Home Size",
+    y = "Number of Houses",
+    fill = "HVAC Efficiency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_hvac_by_size)
+
+# Wall Insulation Distribution by Home Size
+insulation_by_size = future_df %>%
+  filter(!is.na(insulation_category) & !is.na(size_category)) %>%
+  group_by(size_category, insulation_category) %>%
+  summarise(
+    n_houses = n_distinct(bldg_id),
+    .groups = "drop"
+  ) %>%
+  group_by(size_category) %>%
+  mutate(
+    pct = round(n_houses / sum(n_houses) * 100, 1)
+  )
+
+graph_insulation_by_size = ggplot(insulation_by_size, aes(x = size_category, y = n_houses, fill = insulation_category)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Low (1-5)" = "red", 
+                                "Medium (6-10)" = "orange", 
+                                "High (11-16)" = "green")) +
+  labs(
+    title = "Distribution of Wall Insulation by Home Size",
+    subtitle = "Number of houses with each insulation level, grouped by home size",
+    x = "Home Size",
+    y = "Number of Houses",
+    fill = "Wall Insulation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_insulation_by_size)
+
+# Stacked Percentage Bar Charts
+# This shows the proportion within each home size more clearly
+
+graph_hvac_by_size_pct = ggplot(hvac_by_size, aes(x = size_category, y = pct, fill = hvac_category)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, color = "white", fontface = "bold") +
+  scale_fill_manual(values = c("Low (1-3)" = "red", 
+                                "Medium (4-6)" = "orange", 
+                                "High (7-10)" = "green")) +
+  labs(
+    title = "HVAC Efficiency Distribution by Home Size (Percentage)",
+    subtitle = "Proportion of each HVAC efficiency level within home size categories",
+    x = "Home Size",
+    y = "Percentage (%)",
+    fill = "HVAC Efficiency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_hvac_by_size_pct)
+
+graph_window_by_size_pct = ggplot(window_by_size, aes(x = size_category, y = pct, fill = window_category)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, color = "white", fontface = "bold") +
+  scale_fill_manual(values = c("Single Pane (1-4)" = "red", 
+                                "Double Pane (5-7)" = "orange", 
+                                "Double/Triple Low-E (8-11)" = "green")) +
+  labs(
+    title = "Window Type Distribution by Home Size (Percentage)",
+    subtitle = "Proportion of each window type within home size categories",
+    x = "Home Size",
+    y = "Percentage (%)",
+    fill = "Window Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_window_by_size_pct)
+
+graph_insulation_by_size_pct = ggplot(insulation_by_size, aes(x = size_category, y = pct, fill = insulation_category)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, color = "white", fontface = "bold") +
+  scale_fill_manual(values = c("Low (1-5)" = "red", 
+                                "Medium (6-10)" = "orange", 
+                                "High (11-16)" = "green")) +
+  labs(
+    title = "Wall Insulation Distribution by Home Size (Percentage)",
+    subtitle = "Proportion of each insulation level within home size categories",
+    x = "Home Size",
+    y = "Percentage (%)",
+    fill = "Wall Insulation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(graph_insulation_by_size_pct)
+
+```

@@ -1,0 +1,605 @@
+---
+title: "687project"
+output: pdf_document
+date: "2025-11-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(imputeTS)
+library(ggplot2)
+library(purrr)
+library(arrow)
+library(caret)
+library(arules)
+library(arulesViz)
+library(kernlab)
+```
+
+```{r}
+#Directories for each data folder established, static data read in
+static_data <- read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet")
+weather_folder <- "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/"
+energy_folder <- "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/"
+```
+
+```{r}
+weather_summary <- function(county) {
+  #Takes the county and weather directory and forms the URL, then reads it in
+  weatherURL <- paste0(weather_folder, county, ".csv")
+  weatherDF <- read_csv(url(weatherURL))
+  
+  #Only takes weather data from July
+  weatherDF <- weatherDF[months(weatherDF$date_time) %in% month.name[7],]
+  return(weatherDF)
+}
+```
+
+```{r}
+energy_summary <- function(id) {
+  energyURL <- paste0(energy_folder, id, ".parquet")
+  energyDF <- read_parquet(energyURL)
+  
+  energyDF <- energyDF[months(energyDF$time) %in% month.name[7],]
+  
+  energyDF$total_usage <- energyDF$out.electricity.ceiling_fan.energy_consumption + 
+    energyDF$out.electricity.cooling_fans_pumps.energy_consumption+ 
+    energyDF$out.electricity.cooling.energy_consumption+
+    energyDF$out.electricity.freezer.energy_consumption+
+    energyDF$out.electricity.heating_fans_pumps.energy_consumption+
+    energyDF$out.electricity.heating_hp_bkup.energy_consumption+
+    energyDF$out.electricity.heating.energy_consumption+
+    energyDF$out.electricity.hot_tub_heater.energy_consumption+
+    energyDF$out.electricity.hot_tub_pump.energy_consumption+
+    energyDF$out.electricity.hot_water.energy_consumption+
+    energyDF$out.electricity.lighting_exterior.energy_consumption+
+    energyDF$out.electricity.lighting_garage.energy_consumption+
+    energyDF$out.electricity.lighting_interior.energy_consumption+ 
+    energyDF$out.electricity.mech_vent.energy_consumption+
+    energyDF$out.electricity.plug_loads.energy_consumption+ 
+    energyDF$out.electricity.pool_heater.energy_consumption+
+    energyDF$out.electricity.refrigerator.energy_consumption+
+    energyDF$out.electricity.well_pump.energy_consumption+
+    energyDF$out.electricity.ceiling_fan.energy_consumption+ 
+    energyDF$out.electricity.cooling_fans_pumps.energy_consumption+
+    energyDF$out.electricity.cooling.energy_consumption+
+    energyDF$out.electricity.freezer.energy_consumption+
+    energyDF$out.electricity.heating_fans_pumps.energy_consumption+
+    energyDF$out.electricity.heating_hp_bkup.energy_consumption+
+    energyDF$out.electricity.heating.energy_consumption+
+    energyDF$out.electricity.hot_tub_heater.energy_consumption+
+    energyDF$out.electricity.hot_tub_pump.energy_consumption+
+    energyDF$out.electricity.hot_water.energy_consumption+
+    energyDF$out.electricity.lighting_exterior.energy_consumption+
+    energyDF$out.electricity.lighting_garage.energy_consumption+
+    energyDF$out.electricity.lighting_interior.energy_consumption+ 
+    energyDF$out.electricity.mech_vent.energy_consumption+
+    energyDF$out.electricity.plug_loads.energy_consumption+ 
+    energyDF$out.electricity.pool_heater.energy_consumption+
+    energyDF$out.electricity.refrigerator.energy_consumption+
+    energyDF$out.electricity.well_pump.energy_consumption+
+    energyDF$out.electricity.clothes_dryer.energy_consumption+
+    energyDF$out.electricity.clothes_washer.energy_consumption+
+    energyDF$out.electricity.dishwasher.energy_consumption+
+    energyDF$out.electricity.pool_pump.energy_consumption+
+    energyDF$out.electricity.pv.energy_consumption+
+    energyDF$out.electricity.range_oven.energy_consumption+
+    energyDF$out.fuel_oil.heating_hp_bkup.energy_consumption+
+    energyDF$out.fuel_oil.heating.energy_consumption+
+    energyDF$out.fuel_oil.hot_water.energy_consumption+
+    energyDF$out.natural_gas.clothes_dryer.energy_consumption+
+    energyDF$out.natural_gas.fireplace.energy_consumption+
+    energyDF$out.natural_gas.grill.energy_consumption+
+    energyDF$out.natural_gas.heating_hp_bkup.energy_consumption+
+    energyDF$out.natural_gas.heating.energy_consumption+
+    energyDF$out.natural_gas.hot_tub_heater.energy_consumption+
+    energyDF$out.natural_gas.hot_water.energy_consumption+
+    energyDF$out.natural_gas.lighting.energy_consumption+
+    energyDF$out.natural_gas.pool_heater.energy_consumption+
+    energyDF$out.natural_gas.range_oven.energy_consumption+
+    energyDF$out.propane.clothes_dryer.energy_consumption+
+    energyDF$out.propane.heating_hp_bkup.energy_consumption+
+    energyDF$out.propane.heating.energy_consumption+
+    energyDF$out.propane.hot_water.energy_consumption+
+    energyDF$out.propane.range_oven.energy_consumption
+  
+  energyDF <- subset(energyDF, select = -c(out.electricity.ceiling_fan.energy_consumption, 
+    out.electricity.cooling_fans_pumps.energy_consumption,
+    out.electricity.cooling.energy_consumption,
+    out.electricity.freezer.energy_consumption,
+    out.electricity.heating_fans_pumps.energy_consumption,
+    out.electricity.heating_hp_bkup.energy_consumption,
+    out.electricity.heating.energy_consumption,
+    out.electricity.hot_tub_heater.energy_consumption,
+    out.electricity.hot_tub_pump.energy_consumption,
+    out.electricity.hot_water.energy_consumption,
+    out.electricity.lighting_exterior.energy_consumption,
+    out.electricity.lighting_garage.energy_consumption,
+    out.electricity.lighting_interior.energy_consumption, 
+    out.electricity.mech_vent.energy_consumption,
+    out.electricity.plug_loads.energy_consumption, 
+    out.electricity.pool_heater.energy_consumption,
+    out.electricity.refrigerator.energy_consumption,
+    out.electricity.well_pump.energy_consumption,
+    out.electricity.ceiling_fan.energy_consumption, 
+    out.electricity.cooling_fans_pumps.energy_consumption,
+    out.electricity.cooling.energy_consumption,
+    out.electricity.freezer.energy_consumption,
+    out.electricity.heating_fans_pumps.energy_consumption,
+    out.electricity.heating_hp_bkup.energy_consumption,
+    out.electricity.heating.energy_consumption,
+    out.electricity.hot_tub_heater.energy_consumption,
+    out.electricity.hot_tub_pump.energy_consumption,
+    out.electricity.hot_water.energy_consumption,
+    out.electricity.lighting_exterior.energy_consumption,
+    out.electricity.lighting_garage.energy_consumption,
+    out.electricity.lighting_interior.energy_consumption, 
+    out.electricity.mech_vent.energy_consumption,
+    out.electricity.plug_loads.energy_consumption, 
+    out.electricity.pool_heater.energy_consumption,
+    out.electricity.refrigerator.energy_consumption,
+    out.electricity.well_pump.energy_consumption,
+    out.electricity.clothes_dryer.energy_consumption,
+    out.electricity.clothes_washer.energy_consumption,
+    out.electricity.dishwasher.energy_consumption,
+    out.electricity.pool_pump.energy_consumption,
+    out.electricity.pv.energy_consumption,
+    out.electricity.range_oven.energy_consumption,
+    out.fuel_oil.heating_hp_bkup.energy_consumption,
+    out.fuel_oil.heating.energy_consumption,
+    out.fuel_oil.hot_water.energy_consumption,
+    out.natural_gas.clothes_dryer.energy_consumption,
+    out.natural_gas.fireplace.energy_consumption,
+    out.natural_gas.grill.energy_consumption,
+    out.natural_gas.heating_hp_bkup.energy_consumption,
+    out.natural_gas.heating.energy_consumption,
+    out.natural_gas.hot_tub_heater.energy_consumption,
+    out.natural_gas.hot_water.energy_consumption,
+    out.natural_gas.lighting.energy_consumption,
+    out.natural_gas.pool_heater.energy_consumption,
+    out.natural_gas.range_oven.energy_consumption,
+    out.propane.clothes_dryer.energy_consumption,
+    out.propane.heating_hp_bkup.energy_consumption,
+    out.propane.heating.energy_consumption,
+    out.propane.hot_water.energy_consumption,
+    out.propane.range_oven.energy_consumption))
+  
+  energyDF <- energyDF[!is.na(energyDF$time),]
+  
+  return(energyDF)
+}
+```
+
+```{r}
+merged_row <- function(id) {
+  #Takes the static data from just the house selected
+  single_house_static_data <- static_data[static_data$bldg_id == id,]
+  
+  #Gets energy data
+  energyDF <- energy_summary(id)
+  
+  #Selecting static data we want
+  newDF <- single_house_static_data %>% select(bldg_id, 
+                  in.sqft, 
+                  in.geometry_stories,
+                  in.bedrooms,
+                  in.county,
+                  in.weather_file_latitude,
+                  in.weather_file_longitude,
+                  in.hvac_cooling_efficiency,
+                  in.usage_level,
+                  in.windows,
+                  in.window_areas,
+                  in.insulation_ceiling,
+                  in.insulation_floor,
+                  in.insulation_foundation_wall,
+                  in.insulation_rim_joist,
+                  in.insulation_roof,
+                  in.insulation_slab,
+                  in.insulation_wall,
+                  in.ducts)
+  
+  #Gets weather data
+  weatherDF <- weather_summary(newDF$in.county)
+  
+  #Puts static, energy, and weather data into one dataframe
+  newDF <- bind_cols(newDF, energyDF, weatherDF)
+  
+  return(newDF)
+}
+```
+
+```{r}
+#5000 rows is way too many to process and will take too long to run--so we'll do a random sample
+#This will be a stratified random sample to make we are as representative of each county as possible
+#This will create a merged dataframe
+
+combine_and_sample <- function(static_df, n) {
+  #Perform a random stratified sample
+  fraction = n / nrow(static_df)
+  
+  sampled_data = static_df %>% 
+    group_by(in.county) %>% 
+    sample_frac(fraction)
+  
+  #Merge sampled rows by building ID
+  unique_ids <- unique(sampled_data$bldg_id)
+  
+  list_of_dfs <- lapply(unique_ids, function(id) {
+    message(paste("Processing ID:", id)) 
+    return(merged_row(id))
+  })
+  
+  #Combine all individual dataframes into one
+  final_df <- bind_rows(list_of_dfs)
+  
+  return(final_df)
+}
+```
+
+```{r}
+#Let's run the function on a sample of 250 houses
+mergedDF <- combine_and_sample(static_data, 250)
+
+#Examines the result
+head(mergedDF)
+```
+
+```{r}
+#Let's confirm NAs
+
+#Find NA
+check_factor_nas = function(df, col_name) {
+  na_count = sum(is.na(df[[col_name]]))
+  total = nrow(df)
+  pct = round(na_count / total * 100, 2)
+  cat(col_name, ": ", na_count, " NAs (", pct, "%)\n", sep = "")
+}
+
+#Check what values actually exist in the data
+unique(mergedDF$in.insulation_roof)
+unique(mergedDF$in.insulation_ceiling)
+unique(mergedDF$in.insulation_floor)
+unique(mergedDF$in.insulation_foundation_wall)
+unique(mergedDF$in.insulation_rim_joist)
+unique(mergedDF$in.insulation_wall)
+unique(mergedDF$in.insulation_slab)
+unique(mergedDF$in.windows)
+unique(mergedDF$in.ducts)
+unique(mergedDF$in.hvac_cooling_efficiency)
+unique(mergedDF$in.usage_level)
+unique(mergedDF$in.window_areas)
+
+cat("\n=== CHECKING FOR NAs AFTER FACTOR CONVERSION ===\n")
+check_factor_nas(mergedDF, "in.insulation_roof")
+check_factor_nas(mergedDF, "in.insulation_ceiling")
+check_factor_nas(mergedDF, "in.insulation_floor")
+check_factor_nas(mergedDF, "in.insulation_foundation_wall")
+check_factor_nas(mergedDF, "in.insulation_rim_joist")
+check_factor_nas(mergedDF, "in.insulation_wall")
+check_factor_nas(mergedDF, "in.insulation_slab")
+check_factor_nas(mergedDF, "in.windows")
+check_factor_nas(mergedDF, "in.ducts")
+check_factor_nas(mergedDF, "in.hvac_cooling_efficiency")
+check_factor_nas(mergedDF, "in.usage_level")
+check_factor_nas(mergedDF, "in.window_areas")
+```
+
+
+```{r}
+#This will give us a better sense of a house's energy demand based on its square footage
+mergedDF$usage_per_sqft <- mergedDF$total_usage / mergedDF$in.sqft
+```
+
+
+```{r}
+trainList <- createDataPartition(y=modelDF$usage_per_sqft, p=.60, list=FALSE)
+trainSet <- modelDF[trainList,]
+testSet <- modelDF[-trainList,]
+```
+
+```{r}
+mod1 <- ksvm(usage_per_sqft ~ ., data = trainSet, C = 5, cross = 3, prob.model = TRUE)
+mod1
+```
+```{r}
+#Determine accuracy of KSVM model
+svm_pred <- predict(mod1, testSet)
+confusion_matrix_1 <- table(svm_pred, testSet$usage_per_sqft)
+sum(diag(confusion_matrix_1)) / sum(confusion_matrix_1)
+```
+
+
+```{r}
+#Turn insulation, window material/areas, AC efficiency, and usage level into factored values
+#This will gives us numbers to work with rather than strings and give us a better sense of
+#how efficient the components of each house are and how much energy each house demands
+mergedDF$in.insulation_roof <- as.factor(mergedDF$in.insulation_roof)
+  roof_order <- c("Unfinished, Uninsulated", 
+                 "Finished, Uninsulated",
+                 "Finished, R-7",
+                 "Finished, R-13",
+                 "Finished, R-19",
+                 "Finished, R-30",
+                 "Finished, R-38",
+                 "Finished, R-49")
+  mergedDF$in.insulation_roof <- factor(mergedDF$in.insulation_roof, levels = roof_order)
+  mergedDF$in.insulation_roof <- as.numeric(mergedDF$in.insulation_roof)
+
+mergedDF$in.insulation_ceiling <- as.factor(mergedDF$in.insulation_ceiling)
+  ceiling_order <- c("None", 
+                 "Uninsulated",
+                 "R-7",
+                 "R-13",
+                 "R-19",
+                 "R-30",
+                 "R-38",
+                 "R-49")
+  mergedDF$in.insulation_ceiling <- factor(mergedDF$in.insulation_ceiling, levels = ceiling_order)
+  mergedDF$in.insulation_ceiling <- as.numeric(mergedDF$in.insulation_ceiling)
+
+mergedDF$in.insulation_floor <- as.factor(mergedDF$in.insulation_floor)
+  floor_order <- c("None", 
+                 "Uninsulated",
+                 "Ceiling R-13",
+                 "Ceiling R-19",
+                 "Ceiling R-30")
+  mergedDF$in.insulation_floor <- factor(mergedDF$in.insulation_floor, levels = floor_order)
+  mergedDF$in.insulation_floor <- as.numeric(mergedDF$in.insulation_floor)
+
+mergedDF$in.insulation_foundation_wall <- as.factor(mergedDF$in.insulation_foundation_wall)
+  found_wall_order <- c("None", 
+                 "Uninsulated",
+                 "Wall R-5, Exterior",
+                 "Wall R-10, Exterior",
+                 "Wall R-15, Exterior")
+  mergedDF$in.insulation_foundation_wall <- factor(mergedDF$in.insulation_foundation_wall, 
+                                                   levels = found_wall_order)
+  mergedDF$in.insulation_foundation_wall <- as.numeric(mergedDF$in.insulation_foundation_wall)
+
+mergedDF$in.insulation_rim_joist <- as.factor(mergedDF$in.insulation_rim_joist)
+  rim_order <- c("None", 
+                 "Uninsulated",
+                 "R-5, Exterior",
+                 "R-10, Exterior",
+                 "R-15, Exterior")
+  mergedDF$in.insulation_rim_joist <- factor(mergedDF$in.insulation_rim_joist, levels = rim_order)
+  mergedDF$in.insulation_rim_joist <- as.numeric(mergedDF$in.insulation_rim_joist)
+
+mergedDF$in.insulation_wall <- as.factor(mergedDF$in.insulation_wall)
+  wall_order <- c("None", 
+                 "Wood Stud, Uninsulated",
+                 "CMU, 6-in Hollow, Uninsulated",
+                 "Brick, 12-in, 3-wythe, Uninsulated",
+                 "Wood Stud, R-7",
+                 "CMU, 6-in Hollow, R-7",
+                 "Brick, 12-in, 3-wythe, R-7",
+                 "Wood Stud, R-11",
+                 "CMU, 6-in Hollow, R-11",
+                 "Brick, 12-in, 3-wythe, R-11",
+                 "Wood Stud, R-15",
+                 "CMU, 6-in Hollow, R-15",
+                 "Brick, 12-in, 3-wythe, R-15",
+                 "Wood Stud, R-19",
+                 "CMU, 6-in Hollow, R-19",
+                 "Brick, 12-in, 3-wythe, R-19")
+  mergedDF$in.insulation_wall <- factor(mergedDF$in.insulation_wall, levels = wall_order)
+  mergedDF$in.insulation_wall <- as.numeric(mergedDF$in.insulation_wall)
+
+mergedDF$in.insulation_slab <- as.factor(mergedDF$in.insulation_slab)
+slab_order <- c("None",
+                "Uninsulated",
+                "2ft R5 Under, Horizontal",
+                "2ft R5 Perimeter, Vertical",
+                "2ft R10 Under, Horizontal",
+                "2ft R10 Perimeter, Vertical")
+mergedDF$in.insulation_slab <- factor(mergedDF$in.insulation_slab, levels = slab_order)
+mergedDF$in.insulation_slab <- as.numeric(mergedDF$in.insulation_slab)
+
+mergedDF$in.windows <- as.factor(mergedDF$in.windows)
+window_order <- c("None", 
+                "Single, Clear, Non-metal",
+                "Single, Clear, Metal",
+                "Single, Clear, Non-metal, Exterior Clear Storm",
+                "Single, Clear, Metal, Exterior Clear Storm",
+                "Double, Clear, Non-metal, Air",
+                "Double, Clear, Non-metal, Air, Exterior Clear Storm",
+                "Double, Clear, Metal, Air, Exterior Clear Storm",
+                "Double, Low-E, Non-metal, Air, M-Gain",
+                "Double, Clear, Metal, Air",
+                "Triple, Low-E, Non-metal, Air, L-Gain")
+mergedDF$in.windows <- factor(mergedDF$in.windows, levels = window_order)
+mergedDF$in.windows <- as.numeric(mergedDF$in.windows)
+
+mergedDF$in.ducts <- as.factor(mergedDF$in.ducts)
+duct_order <- c("None", 
+                "30% Leakage, Uninsulated",
+                "30% Leakage, R-4",
+                "30% Leakage, R-6",
+                "30% Leakage, R-8",
+                "20% Leakage, Uninsulated",
+                "20% Leakage, R-4",
+                "20% Leakage, R-6",
+                "20% Leakage, R-8",
+                "10% Leakage, Uninsulated",
+                "10% Leakage, R-4",
+                "10% Leakage, R-6",
+                "10% Leakage, R-8",
+                "0% Leakage, Uninsulated")
+mergedDF$in.ducts <- factor(mergedDF$in.ducts, levels = duct_order)
+mergedDF$in.ducts <- as.numeric(mergedDF$in.ducts)
+ 
+mergedDF$in.hvac_cooling_efficiency <- as.factor(mergedDF$in.hvac_cooling_efficiency)
+cooling_order <- c("None",  
+                 "Heat Pump",
+                 "AC, SEER 8",
+                 "AC, SEER 10", 
+                 "AC, SEER 13",
+                 "AC, SEER 15", 
+                 "Room AC, EER 8.5" ,
+                 "Room AC, EER 9.8",
+                 "Room AC, EER 10.7", 
+                 "Room AC, EER 12.0")
+mergedDF$in.hvac_cooling_efficiency <- factor(mergedDF$in.hvac_cooling_efficiency, 
+                                              levels = cooling_order)
+mergedDF$in.hvac_cooling_efficiency <- as.numeric(mergedDF$in.hvac_cooling_efficiency)
+ 
+mergedDF$in.usage_level <- as.factor(mergedDF$in.usage_level)
+usage_order <- c("Low", 
+                 "Medium", 
+                 "High")
+mergedDF$in.usage_level <- factor(mergedDF$in.usage_level, levels = usage_order)
+mergedDF$in.usage_level <- as.numeric(mergedDF$in.usage_level)
+ 
+mergedDF$in.window_areas <- as.factor(mergedDF$in.window_areas)
+  window_area_order <- c("F6 B6 L6 R6", 
+                 "F9 B9 L9 R9", 
+                 "F12 B12 L12 R12", 
+                 "F15 B15 L15 R15", 
+                 "F18 B18 L18 R18" , 
+                 "F30 B30 L30 R30")
+mergedDF$in.window_areas <- factor(mergedDF$in.window_areas, levels = window_area_order)
+mergedDF$in.window_areas <- as.numeric(mergedDF$in.window_areas)
+```
+
+```{r}
+#There are some values that we don't need to create/use any predictive models
+#Things like bldg_id and county (a character value) can't account for energy usage
+#Leaving in total usage would make it a predictor for how much is used per sqft which we don't want
+modelDF <- mergedDF
+modelDF <- modelDF %>% select(-c('bldg_id',
+                                 'in.county',
+                                 'in.weather_file_latitude',
+                                 'in.weather_file_longitude',
+                                 'total_usage',
+                                 'time',
+                                 'in.insulation_rim_joist',
+                                 'in.insulation_roof',
+                                 'in.insulation_slab'
+                              ))
+```
+
+```{r}
+#Moves date_time to the first column for easier reading
+mergedDF <- mergedDF %>% relocate(time, .before = bldg_id)
+```
+
+```{r}
+#Bit of exploratory analysis to see what we're working with here
+#Here we can see which columns might be useful for predictions and which ones might not
+summary(mergedDF)
+```
+
+
+```{r}
+#Multiple regression model
+lmModel <- lm(usage_per_sqft ~ ., data=modelDF)
+summary(lmModel)
+
+trainList <- createDataPartition(y=modelDF$usage_per_sqft, p=.60, list=FALSE)
+trainSet <- modelDF[trainList,]
+testSet <- modelDF[-trainList,]
+
+predDF <- predict(lmModel, testSet)
+
+sqrt(mean((predDF - testSet$usage_per_sqft)^2))
+```
+
+
+
+```{r}
+#New dataset with all July temperatures 5 degrees warmer (in Celsius)
+hotter_data <- modelDF
+hotter_data$'Dry Bulb Temperature [°C]' <- hotter_data$'Dry Bulb Temperature [°C]' + 5
+#We'll need to add time back in from mergedDF
+#We might need to separate the hour from everything as well
+hotter_data$time <- mergedDF %>% select('time')
+summary(hotter_data)
+#Apparently str() showed that there was a time value of POSIXct format within
+#hotter_data$time, if I didn't call it it wouldn't work otherwise...never seen that before
+hotter_data$hour <- hour(hotter_data$time$time)
+
+#Let's predict with this new data using our best model
+hotter_data$hotter_usage_pred <- predict(lmModel, newdata=hotter_data)
+
+#We don't need the full time anymore now that we have the hour
+hotter_data <- hotter_data %>% select(-c('time'))
+```
+
+```{r}
+#We'll need to sum up the energy usage per sqft for each house
+hourly_usage <- hotter_data %>%
+  #Groups by the hour column we just created
+  group_by(hour) %>%
+  summarise(
+    #Sum of current usage per sqft
+    current_sum = sum(usage_per_sqft),
+    #Sum of predicted future use per sqft
+    hotter_sum = sum(hotter_usage_pred)
+  )
+```
+
+```{r}
+hourly_usage %>%
+  ggplot() +
+  aes(x=hour) +
+  geom_line(aes(y = current_sum, color = "Current Usage Per Square Foot (kWh/sqft)"), linewidth = 1) + 
+  xlab("Hour of Day") +
+  ylab("Usage Per Square Foot (KWH/sqft)") +
+  ggtitle("Hourly Energy Usage Per Square Foot (in kWh/sqft)") +
+  scale_color_manual(name = "Key", values = c("Current Usage Per Square Foot (kWh/sqft)" = "green")) +
+  scale_x_continuous(breaks = 0:23) +
+  theme_minimal()
+```
+
+```{r}
+hourly_usage %>%
+  ggplot() +
+  aes(x=hour) +
+  geom_line(aes(y = hotter_sum, color = "Future Usage Per Square Foot (kWh/sqft)"), linewidth = 1) + 
+  xlab("Hour of Day") +
+  ylab("Usage Per Square Foot (KWH/sqft)") +
+  ggtitle("Hourly Energy Usage Per Square Foot (in kWh/sqft)") +
+  scale_color_manual(name = "Key", values = c("Future Usage Per Square Foot (kWh/sqft)" = "red")) +
+  scale_x_continuous(breaks = 0:23) +
+  theme_minimal()
+```
+
+```{r}
+hourly_usage %>%
+  ggplot() +
+  aes(x=hour) +
+  geom_line(aes(y = current_sum, color = "Current Usage Per Square Foot (kWh/sqft)"), linewidth = 1) + 
+  geom_line(aes(y = hotter_sum, color = "Future Usage Per Square Foot (kWh/sqft)"), linewidth = 1) + 
+  xlab("Hour of Day") +
+  ylab("Usage Per Square Foot (KWH/sqft)") +
+  ggtitle("Hourly Energy Usage Per Square Foot (in kWh/sqft)") +
+  scale_color_manual(name = "Key", values = c("Current Usage Per Square Foot (kWh/sqft)" = "green", 
+                                              "Future Usage Per Square Foot (kWh/sqft)" = "red")) +
+  scale_x_continuous(breaks = 0:23) +
+  theme_minimal()
+```
+
+```{r}
+#Current peak energy demand
+current_peak <- max(hourly_usage$current_sum)
+
+#Future peak energy demand
+future_peak <- max(hourly_usage$hotter_sum)
+
+#Calculate percent increase
+((future_peak - current_peak) / current_peak) * 100
+```
+
+> This is a pretty big increase in demand!!
